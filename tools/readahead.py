@@ -111,21 +111,6 @@ KRETFUNC_PROBE(RA_FUNC)
     return 0;
 }
 
-KRETFUNC_PROBE(__page_cache_alloc, gfp_t gfp, struct page *retval)
-{
-    u64 ts;
-    u32 zero = 0; // static key for accessing pages[0]
-    u32 pid = bpf_get_current_pid_tgid();
-    u8 *f = flag.lookup(&pid);
-
-    if (f != NULL && *f == 1) {
-        ts = bpf_ktime_get_ns();
-        birth.update(&retval, &ts);
-        pages.atomic_increment(zero);
-    }
-    return 0;
-}
-
 KFUNC_PROBE(mark_page_accessed, struct page *arg0)
 {
     u64 ts, delta;
@@ -142,14 +127,56 @@ KFUNC_PROBE(mark_page_accessed, struct page *arg0)
 }
 """
 
+bpf_text_kfunc_alloc = """
+KRETFUNC_PROBE(__page_cache_alloc, gfp_t gfp, struct page *retval)
+{
+    u64 ts;
+    u32 zero = 0; // static key for accessing pages[0]
+    u32 pid = bpf_get_current_pid_tgid();
+    u8 *f = flag.lookup(&pid);
+
+    if (f != NULL && *f == 1) {
+        ts = bpf_ktime_get_ns();
+        birth.update(&retval, &ts);
+        pages.atomic_increment(zero);
+    }
+    return 0;
+}
+"""
+
+bpf_text_kfunc_alloc_folio = """
+KRETFUNC_PROBE(filemap_alloc_folio, gfp_t gfp, int order, struct folio *folio)
+{
+    u64 ts;
+    u32 zero = 0; // static key for accessing pages[0]
+    u32 pid = bpf_get_current_pid_tgid();
+    u8 *f = flag.lookup(&pid);
+    struct page *retval = &folio->page;
+
+    if (f != NULL && *f == 1) {
+        ts = bpf_ktime_get_ns();
+        birth.update(&retval, &ts);
+        pages.atomic_increment(zero);
+    }
+    return 0;
+}
+"""
+
 if BPF.support_kfunc():
+    print("support kfunc")
     if BPF.get_kprobe_functions(b"__do_page_cache_readahead"):
         ra_func = "__do_page_cache_readahead"
     else:
         ra_func = "do_page_cache_ra"
     bpf_text += bpf_text_kfunc.replace("RA_FUNC", ra_func)
+
+    if BPF.get_kprobe_functions(b"__page_cache_alloc"):
+        bpf_text += bpf_text_kfunc_alloc
+    else:
+        bpf_text += bpf_text_kfunc_alloc_folio
     b = BPF(text=bpf_text)
 else:
+    print("doesn't support kfunc {}".format(BPF.ksymname("bpf_trampoline_link_prog")))
     bpf_text += bpf_text_kprobe
     b = BPF(text=bpf_text)
     if BPF.get_kprobe_functions(b"__do_page_cache_readahead"):
